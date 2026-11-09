@@ -3,6 +3,7 @@ mod challenge;
 mod cli;
 mod net;
 mod quest;
+mod referral;
 mod reward;
 mod run;
 mod support;
