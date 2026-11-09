@@ -11,18 +11,63 @@ pub struct Device {
     pub app_version: String,
 }
 
-const UA: &str = "Mozilla/5.0 (Linux; Android 13; SM-S918B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36";
-const MODEL: &str = "SM-S918B";
-const OS: &str = "13";
+const MODELS: &[(&str, &str)] = &[
+    ("SM-S918B", "14"),
+    ("SM-S916B", "14"),
+    ("SM-S911B", "13"),
+    ("SM-A546B", "14"),
+    ("SM-A346B", "14"),
+    ("SM-A536B", "13"),
+    ("Pixel 7", "14"),
+    ("Pixel 8", "14"),
+    ("Pixel 6a", "13"),
+    ("Pixel 7a", "14"),
+    ("M2101K6G", "13"),
+    ("22120RN86G", "13"),
+    ("CPH2451", "14"),
+    ("CPH2381", "13"),
+    ("V2210", "13"),
+    ("2201116SG", "13"),
+    ("Infinix X6819", "13"),
+    ("itel S23", "12"),
+    ("SM-A155F", "14"),
+    ("CPH2583", "14"),
+];
+
+const CHROME_BUILD: &str = "131.0.6778.200";
 
 const HEX: &[u8] = b"0123456789abcdef";
 
-fn random_android_id() -> String {
-    let mut out = String::with_capacity(16);
-    let seed = std::time::SystemTime::now()
+fn seed_for(email: &str) -> u64 {
+    let mut state = 0xCBF29CE484222325u64;
+    for byte in email.to_lowercase().as_bytes() {
+        state ^= *byte as u64;
+        state = state.wrapping_mul(0x100000001B3);
+    }
+    state ^= std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.subsec_nanos() as u64 ^ d.as_secs())
+        .map(|d| d.subsec_nanos() as u64)
         .unwrap_or(0);
+    state
+}
+
+fn pick_model(seed: u64) -> usize {
+    let mut state = seed;
+    state = state
+        .wrapping_mul(6364136223846793005)
+        .wrapping_add(1442695040888963407);
+    ((state >> 33) as usize) % MODELS.len()
+}
+
+fn user_agent(model: &str, os: &str) -> String {
+    format!(
+        "Mozilla/5.0 (Linux; Android {}; {}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{} Mobile Safari/537.36",
+        os, model, CHROME_BUILD
+    )
+}
+
+fn random_android_id(seed: u64) -> String {
+    let mut out = String::with_capacity(16);
     let mut state = seed ^ (std::process::id() as u64).wrapping_mul(0x9E3779B97F4A7C15);
     for _ in 0..16 {
         state = state
@@ -34,12 +79,14 @@ fn random_android_id() -> String {
     out
 }
 
-fn fresh() -> Device {
+fn fresh(email: &str) -> Device {
+    let seed = seed_for(email);
+    let (model, os) = MODELS[pick_model(seed)];
     Device {
-        user_agent: UA.to_string(),
-        device_id: random_android_id(),
-        device_model: MODEL.to_string(),
-        os_version: OS.to_string(),
+        user_agent: user_agent(model, os),
+        device_id: random_android_id(seed),
+        device_model: model.to_string(),
+        os_version: os.to_string(),
         app_version: crate::net::client::app_version(),
     }
 }
@@ -63,7 +110,7 @@ pub fn for_email(email: &str) -> Device {
     if let Some(hit) = map.get(&key) {
         return hit.clone();
     }
-    let dev = fresh();
+    let dev = fresh(email);
     map.insert(key, dev.clone());
     save(&map);
     dev

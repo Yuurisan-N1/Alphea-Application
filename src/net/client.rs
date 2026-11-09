@@ -51,3 +51,24 @@ pub async fn call(
     let value = serde_json::from_str(&text).unwrap_or(Value::String(text));
     Ok((status, value))
 }
+
+pub async fn call_reason(
+    client: &Client,
+    url: &str,
+    head: HeaderMap,
+    body: &Value,
+) -> Result<(u16, Value, String)> {
+    let reply = client.post(url).headers(head).json(body).send().await?;
+    let status = reply.status().as_u16();
+    let text = reply.text().await?;
+    let value = serde_json::from_str(&text).unwrap_or(Value::String(text.clone()));
+    let message = serde_json::from_str::<Value>(&text)
+        .ok()
+        .and_then(|node| {
+            node.get("message")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .unwrap_or_default();
+    Ok((status, value, message))
+}
