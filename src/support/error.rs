@@ -55,3 +55,10 @@ pub fn refusal(status: u16) -> &'static str {
         _ => "the server refused the request",
     }
 }
+
+pub fn refusal_with(status: u16, extra: &str) -> String {
+    if extra.is_empty() {
+        return refusal(status).to_string();
+    }
+    format!("{} ({})", refusal(status), sanitize(extra))
+}
