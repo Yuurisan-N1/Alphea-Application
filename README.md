@@ -311,6 +311,9 @@ Alphea-Application/
 │   │   ├── claim.rs                     # Quest claim request
 │   │   ├── list.rs                      # Quest list fetch
 │   │   └── mod.rs
+│   ├── referral/
+│   │   ├── mod.rs
+│   │   └── redeem.rs                    # Bind referral code
 │   ├── reward/
 │   │   ├── mod.rs
 │   │   └── summary.rs                   # Reward point summary fetch
@@ -324,6 +327,7 @@ Alphea-Application/
 │   │   ├── banner.rs                    # ASCII banner and terminal title
 │   │   ├── env.rs                       # Account file loader
 │   │   ├── error.rs                     # Error sanitizer and refusal mapper
+│   │   ├── id.rs                        # Auto generate string UUID v4
 │   │   ├── mod.rs
 │   │   ├── signal.rs                    # Ctrl+C interrupt watcher
 │   │   └── store.rs                     # Session token cache read and write
