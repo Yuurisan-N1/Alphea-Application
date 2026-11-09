@@ -338,7 +338,7 @@ async fn mine(
     let mut rescues: u32 = 0;
     let mut streak: u32 = 0;
     crate::support::log::status("The account waits for the first server beat");
-    while valid < TARGET_SECONDS {
+    while valid < TARGET_SECONDS && !before_reset_guard() {
         tokio::time::sleep(Duration::from_secs(HEARTBEAT_SECONDS)).await;
 
         let outcome = match beat_once(client, dev, &live, &session.id).await {
@@ -357,7 +357,9 @@ async fn mine(
                     rescues = 0;
                 }
                 if beat.parsed {
-                    valid = beat.valid_seconds;
+                    if beat.valid_seconds > valid {
+                        valid = beat.valid_seconds;
+                    }
                 } else if beats % 10 == 0 {
                     ly("The heartbeat reply carries no valid seconds so the shift keeps waiting");
                 }
@@ -365,6 +367,9 @@ async fn mine(
                     "Account {} The mining shift for the account holds {} of {} valid seconds {}",
                     label, valid, TARGET_SECONDS, beats
                 ));
+                if valid >= TARGET_SECONDS {
+                    break;
+                }
             }
             Err(crate::activity::heartbeat::BeatFail::SlotLost) => {
                 ly("The mining slot moved to another session so the shift retakes it");
@@ -514,4 +519,15 @@ async fn report_all(ctx: &Arc<Ctx>, sessions: &HashMap<String, Session>) {
             ));
         }
     }
+}
+
+fn before_reset_guard() -> bool {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let seconds_into_utc_day = now % 86_400;
+    const RESET_SPAN: u64 = 86_400;
+    const GUARD_WINDOW: u64 = 3_600;
+    RESET_SPAN - seconds_into_utc_day <= GUARD_WINDOW
 }
