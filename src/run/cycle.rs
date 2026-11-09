@@ -12,8 +12,8 @@ use crate::Ctx;
 const HEARTBEAT_SECONDS: u64 = 60;
 const TARGET_SECONDS: u64 = crate::support::consts::net::DAILY_TARGET_SECONDS;
 const RETRY_SECONDS: u64 = 300;
-const RENEWAL_LIMIT: u32 = 24;
 const SERVICE_WAIT: Duration = Duration::from_secs(15);
+const START_RETRY_SECONDS: u64 = 300;
 
 pub async fn run(ctx: &Arc<Ctx>) -> Result<()> {
     let mut cycle: u64 = 0;
@@ -36,7 +36,6 @@ pub async fn run(ctx: &Arc<Ctx>) -> Result<()> {
                 gap();
             }
             index += 1;
-            ly("The account starts the mining shift");
             let client = ctx.client.clone();
             let dev = Arc::new(crate::net::device::for_email(&account.email));
             let token = session.access_token.clone();
@@ -56,6 +55,7 @@ pub async fn run(ctx: &Arc<Ctx>) -> Result<()> {
                         &credential,
                         &mail,
                         &spawn_ctx,
+                        index,
                     )
                     .await
                 }),
@@ -172,7 +172,9 @@ pub async fn ready_sessions(ctx: &Arc<Ctx>) -> HashMap<String, Session> {
             Some(saved) => {
                 let _ = ctx.store.lock().unwrap().put(&account.email, saved.clone());
                 lg("The session for the account was renewed from the cache");
-                out.insert(account.email.clone(), saved);
+                out.insert(account.email.clone(), saved.clone());
+                let dev = crate::net::device::for_email(&account.email);
+                report_balance(&ctx.client, &dev, &saved.access_token).await;
             }
             None => {
                 sign_in_and_store(ctx, &account.email, &dev, &mut out).await;
@@ -190,8 +192,25 @@ async fn sign_in_and_store(
 ) {
     match sign_in(ctx, email, dev).await {
         Ok(session) => {
+            if !ctx.cfg.settings.referral_code.is_empty() {
+                match crate::referral::redeem::redeem(
+                    &ctx.client,
+                    dev,
+                    &session.access_token,
+                    &ctx.cfg.settings.referral_code,
+                )
+                .await
+                {
+                    Ok(()) => lg("The referral code was bound for the account"),
+                    Err(err) => lr(&format!(
+                        "The referral code was not bound because {}",
+                        describe(&err)
+                    )),
+                }
+            }
             let _ = ctx.store.lock().unwrap().put(email, session.clone());
-            out.insert(email.to_string(), session);
+            out.insert(email.to_string(), session.clone());
+            report_balance(&ctx.client, dev, &session.access_token).await;
         }
         Err(err) => {
             lr(&format!(
@@ -243,18 +262,24 @@ async fn beat_once(
     dev: &crate::net::device::Device,
     token: &str,
     id: &str,
-) -> anyhow::Result<crate::activity::heartbeat::Beat> {
+) -> Result<crate::activity::heartbeat::Beat, StalledBeat> {
     match tokio::time::timeout(
         Duration::from_secs(HEARTBEAT_SECONDS * 2),
         crate::activity::heartbeat::send(client, dev, token, id),
     )
     .await
     {
-        Ok(result) => result,
-        Err(_) => Err(anyhow::anyhow!(
-            "the heartbeat stalled so the beat is retried"
-        )),
+        Ok(result) => match result {
+            Ok(beat) => Ok(beat),
+            Err(fail) => Err(StalledBeat::Failed(fail)),
+        },
+        Err(_) => Err(StalledBeat::Hung),
     }
+}
+
+enum StalledBeat {
+    Hung,
+    Failed(crate::activity::heartbeat::BeatFail),
 }
 
 async fn restart_session(
@@ -277,43 +302,54 @@ async fn mine(
     credential: &str,
     email: &str,
     ctx: &Arc<Ctx>,
+    label: usize,
 ) -> bool {
     let mut valid: u64 = 0;
     let mut beats: u64 = 0;
-    let mut session = match crate::activity::foreground::start(client, dev, token).await {
-        Ok(session) => session,
-        Err(err) => {
-            lr(&format!(
-                "The mining session for the account could not start because {}",
-                describe(&err)
-            ));
-            return false;
+    let mut session = loop {
+        match crate::activity::foreground::start(client, dev, token).await {
+            Ok(session) => break session,
+            Err(err) => {
+                let cause = describe(&err);
+                if cause.contains("service is not answering")
+                    || cause.contains("limiting requests")
+                {
+                    ly(&format!(
+                        "The mining session waits because {} and the start retries",
+                        cause
+                    ));
+                    tokio::time::sleep(Duration::from_secs(START_RETRY_SECONDS)).await;
+                    continue;
+                }
+                lr(&format!(
+                    "The mining session could not start because {}",
+                    cause
+                ));
+                return false;
+            }
         }
     };
     lg("The mining session for the account is running");
 
+    claim_quests(client, dev, token).await;
     let mut live = token.to_string();
     let mut live_refresh = renewal.to_string();
     let mut live_credential = credential.to_string();
-    let mut renewed: u32 = 0;
     let mut rescues: u32 = 0;
     let mut streak: u32 = 0;
     crate::support::log::status("The account waits for the first server beat");
     while valid < TARGET_SECONDS {
         tokio::time::sleep(Duration::from_secs(HEARTBEAT_SECONDS)).await;
 
-        let attempted = match beat_once(client, dev, &live, &session.id).await {
+        let outcome = match beat_once(client, dev, &live, &session.id).await {
             Ok(beat) => Ok(beat),
-            Err(err) => {
-                let cause = describe(&err);
-                if cause.contains("the heartbeat stalled") {
-                    lr("The heartbeat for the account hung so the beat retries");
-                    continue;
-                }
-                Err(err)
+            Err(StalledBeat::Hung) => {
+                lr("The heartbeat for the account hung so the beat retries");
+                continue;
             }
+            Err(StalledBeat::Failed(fail)) => Err(fail),
         };
-        match attempted {
+        match outcome {
             Ok(beat) => {
                 beats += 1;
                 streak = 0;
@@ -326,91 +362,74 @@ async fn mine(
                     ly("The heartbeat reply carries no valid seconds so the shift keeps waiting");
                 }
                 crate::support::log::progress(&format!(
-                    "The mining shift for the account holds {} of {} valid seconds {}",
-                    valid, TARGET_SECONDS, beats
+                    "Account {} The mining shift for the account holds {} of {} valid seconds {}",
+                    label, valid, TARGET_SECONDS, beats
                 ));
             }
-            Err(err) => {
-                let cause = describe(&err);
-                if cause.contains("connection could not be established") {
-                    tokio::time::sleep(Duration::from_secs(5)).await;
-                    if let Ok(beat) = beat_once(client, dev, &live, &session.id).await {
-                        if beat.parsed {
-                            valid = beat.valid_seconds;
-                        }
-                        beats += 1;
-                        crate::support::log::progress(&format!(
-                            "The mining shift for the account holds {} of {} valid seconds {}",
-                            valid, TARGET_SECONDS, beats
-                        ));
-                        continue;
-                    }
+            Err(crate::activity::heartbeat::BeatFail::SlotLost) => {
+                ly("The mining slot moved to another session so the shift retakes it");
+                if let Some(fresh) = restart_session(client, dev, &live, &session.id).await {
+                    session = fresh;
                 }
-                if cause.contains("credential was refused") {
-                    streak += 1;
-                    if streak < 3 {
-                        lg("The heartbeat was refused so the beat is skipped");
-                        continue;
-                    }
-                    if rescues >= 2 {
-                        lr("The mining session was refused so the shift ends early");
-                        break;
-                    }
-                    rescues += 1;
-                    let mut revived = false;
-
-                    if !live_refresh.is_empty() {
-                        if let Some(fresh) = with_service_retry(|| {
-                            crate::challenge::refresh::send(client, dev, &live_refresh)
-                        })
-                        .await
-                        {
-                            live = fresh.access_token.clone();
-                            live_refresh = fresh.refresh_token.clone();
-                            revived = true;
-                        }
-                    }
-
-                    if !revived && !live_credential.is_empty() {
-                        if let Some(value) = with_service_retry(|| {
-                            crate::challenge::device::login(client, dev, &live_credential)
-                        })
-                        .await
-                        {
-                            live = value.tokens.access_token.clone();
-                            live_refresh = value.tokens.refresh_token.clone();
-                            live_credential = value.credential.clone();
-                            revived = true;
-                        } else {
-                            live_credential.clear();
-                        }
-                    }
-
-                    if revived {
-                        renewed += 1;
-                        let saved = Session {
-                            access_token: live.clone(),
-                            refresh_token: live_refresh.clone(),
-                            device_credential: live_credential.clone(),
-                        };
-                        let _ = ctx.store.lock().unwrap().put(email, saved);
-                        if let Some(fresh) = restart_session(client, dev, &live, &session.id).await
-                        {
-                            session = fresh;
-                            lg("The session for the account was renewed inside the shift");
-                            streak = 0;
-                            continue;
-                        }
-                        lg("The session for the account was renewed inside the shift");
-                        streak = 0;
-                        continue;
-                    }
+                streak = 0;
+                continue;
+            }
+            Err(crate::activity::heartbeat::BeatFail::Refused) => {
+                streak += 1;
+                if streak < 3 {
+                    lg("The heartbeat was refused so the beat is skipped");
                     continue;
                 }
-                lr(&format!(
-                    "The heartbeat for the account was refused because {}",
-                    cause
-                ));
+                if rescues >= 2 {
+                    lr("The mining session was refused so the shift ends early");
+                    break;
+                }
+                rescues += 1;
+                let mut revived = false;
+
+                if !live_refresh.is_empty() {
+                    if let Some(fresh) = with_service_retry(|| {
+                        crate::challenge::refresh::send(client, dev, &live_refresh)
+                    })
+                    .await
+                    {
+                        live = fresh.access_token.clone();
+                        live_refresh = fresh.refresh_token.clone();
+                        revived = true;
+                    }
+                }
+
+                if !revived && !live_credential.is_empty() {
+                    if let Some(value) = with_service_retry(|| {
+                        crate::challenge::device::login(client, dev, &live_credential)
+                    })
+                    .await
+                    {
+                        live = value.tokens.access_token.clone();
+                        live_refresh = value.tokens.refresh_token.clone();
+                        live_credential = value.credential.clone();
+                        revived = true;
+                    } else {
+                        live_credential.clear();
+                    }
+                }
+
+                if revived {
+                    let saved = Session {
+                        access_token: live.clone(),
+                        refresh_token: live_refresh.clone(),
+                        device_credential: live_credential.clone(),
+                    };
+                    let _ = ctx.store.lock().unwrap().put(email, saved);
+                    if let Some(fresh) = restart_session(client, dev, &live, &session.id).await
+                    {
+                        session = fresh;
+                    }
+                    lg("The session for the account was renewed inside the shift");
+                    streak = 0;
+                    continue;
+                }
+                continue;
             }
         }
         if valid >= TARGET_SECONDS {
@@ -448,13 +467,24 @@ async fn claim_quests(client: &wreq::Client, dev: &crate::net::device::Device, t
         if quest.state != "QUEST_STATE_CLAIMABLE" {
             continue;
         }
-        match crate::quest::claim::send(client, dev, token, &quest.id).await {
-            Ok(true) => lg(&format!(
-                "The quest {} was claimed",
-                crate::support::log::clean_text(&quest.id, "quest")
+        match crate::quest::claim::send(client, dev, token, &quest.id, &quest.period).await {
+            Ok(reward) => lg(&format!(
+                "The quest {} was claimed and it paid {} points",
+                crate::support::log::clean_text(&quest.id, "quest"),
+                crate::support::log::num(reward)
             )),
             _ => lg("The quest claim was refused"),
         }
+    }
+}
+
+async fn report_balance(client: &wreq::Client, dev: &crate::net::device::Device, token: &str) {
+    match crate::reward::summary::read(client, dev, token).await {
+        Ok(summary) => lg(&format!(
+            "The point balance stands at {} points",
+            crate::support::log::num(summary.total)
+        )),
+        Err(_) => lr("The point balance was not read"),
     }
 }
 
