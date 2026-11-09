@@ -7,6 +7,7 @@ use crate::support::error::refusal;
 
 pub struct Quest {
     pub id: String,
+    pub period: String,
     pub state: String,
 }
 
@@ -35,10 +36,19 @@ pub async fn read(shared: &wreq::Client, dev: &Device, token: &str) -> Result<Ve
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string();
+        let period = item
+            .get("periodKey")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
         if id.is_empty() {
             continue;
         }
-        out.push(Quest { id, state });
+        out.push(Quest {
+            id,
+            period,
+            state,
+        });
     }
     Ok(out)
 }
