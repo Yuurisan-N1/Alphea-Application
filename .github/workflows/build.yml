@@ -1,0 +1,56 @@
+name: Build Release
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build alphea-bot (${{ matrix.artifact }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact: alphea-bot-linux-x86_64
+            binary: target/release/alphea-bot
+
+          - os: windows-latest
+            artifact: alphea-bot-windows-x86_64
+            binary: target/release/alphea-bot.exe
+
+          - os: macos-latest
+            artifact: alphea-bot-macos-aarch64
+            binary: target/release/alphea-bot
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run tests
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo test --release --locked
+
+      - name: Build release
+        run: cargo build --release --locked
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.binary }}
+
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ matrix.binary }}
