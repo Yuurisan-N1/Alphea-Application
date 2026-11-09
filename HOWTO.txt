@@ -1,0 +1,49 @@
+Alphea Connect HOWTO
+
+Short version, four steps.
+
+1. INSTALL RUST
+   Windows / Linux / macOS: https://rustup.rs  then reopen the terminal and check:
+       rustc --version
+
+2. FILL data.txt
+   Put the gmail addresses in the file, one per line:
+       sample@gmail.com
+   Blank lines and lines starting with # are ignored.
+
+3. BUILD
+       ./run.sh build
+
+4. RUN
+       Windows :  run.sh run   (or target\release\alphea-bot.exe)
+       Linux   :  ./run.sh run
+       Detached:  ./run.sh screen     (attach: screen -r alphea-bot)
+       Stop    :  ./run.sh stop       or press Ctrl+C in the foreground window
+
+FIRST RUN
+   The bot asks for a verification code for each gmail. Type the six digit code
+   from the inbox and press Enter. After that the bot signs in and starts the
+   mining shift on its own.
+
+WHAT YOU SHOULD SEE
+   The banner, then the sign in, then one green line that updates in place:
+       The mining shift for the account holds 61 of 43200 valid seconds 1
+   The number climbs every minute. The shift stops on its own once the server
+   reports the twelve hour target, then the quests are claimed.
+
+PROXY
+   proxy.txt holds one proxy per line:
+       http://user:pass@host:port
+   Leave the file empty to connect directly.
+
+CONFIG
+   config.json holds the pause between cycles:
+       {"settings": {"sleep_seconds": 3600}}
+
+NEXT RUNS
+   The session cache keeps every token that was issued, so a later run skips
+   the code. Keep the account in one place only: starting the same account on
+   another machine ends the session that is already running.
+
+MAKE
+   make build, make release, make run, make start, make check, make clean.
